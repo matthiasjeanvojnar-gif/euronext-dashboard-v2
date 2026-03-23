@@ -1,252 +1,110 @@
 """
 Euronext Market Activity Dashboard
-Streamlit Cloud edition — fetches live delayed data on page load.
+Yahoo Finance proxy edition — broad-universe market activity approximation.
 """
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import requests
-import json
-import time
-import logging
+import yfinance as yf
 from datetime import datetime, timezone
-from bs4 import BeautifulSoup
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIG
 # ═══════════════════════════════════════════════════════════════
 
 MARKETS = {
-    "Paris":     {"mic": "XPAR", "flag": "🇫🇷", "currency": "EUR"},
-    "Amsterdam": {"mic": "XAMS", "flag": "🇳🇱", "currency": "EUR"},
-    "Brussels":  {"mic": "XBRU", "flag": "🇧🇪", "currency": "EUR"},
-    "Lisbon":    {"mic": "XLIS", "flag": "🇵🇹", "currency": "EUR"},
-    "Milan":     {"mic": "XMIL", "flag": "🇮🇹", "currency": "EUR"},
-    "Oslo":      {"mic": "XOSL", "flag": "🇳🇴", "currency": "NOK"},
-    "Dublin":    {"mic": "XDUB", "flag": "🇮🇪", "currency": "EUR"},
+    "Paris":     {"flag": "🇫🇷"},
+    "Amsterdam": {"flag": "🇳🇱"},
+    "Brussels":  {"flag": "🇧🇪"},
+    "Lisbon":    {"flag": "🇵🇹"},
+    "Milan":     {"flag": "🇮🇹"},
+    "Oslo":      {"flag": "🇳🇴"},
+    "Dublin":    {"flag": "🇮🇪"},
 }
 
-BASE_URL = "https://live.euronext.com"
-NOK_EUR_RATE = 0.085
-PAGE_SIZE = 100
-MAX_PAGES = 30
-REQUEST_TIMEOUT = 20
+# Broad-ish starter universe by market.
+# Expand this list over time.
+UNIVERSE = [
+    # Paris
+    {"ticker": "MC.PA", "name": "LVMH", "market": "Paris", "sector": "Consumer Discretionary"},
+    {"ticker": "OR.PA", "name": "L'Oreal", "market": "Paris", "sector": "Consumer Staples"},
+    {"ticker": "TTE.PA", "name": "TotalEnergies", "market": "Paris", "sector": "Energy"},
+    {"ticker": "SAN.PA", "name": "Sanofi", "market": "Paris", "sector": "Health Care"},
+    {"ticker": "AIR.PA", "name": "Airbus", "market": "Paris", "sector": "Industrials"},
+    {"ticker": "SU.PA", "name": "Schneider Electric", "market": "Paris", "sector": "Industrials"},
+    {"ticker": "BNP.PA", "name": "BNP Paribas", "market": "Paris", "sector": "Financials"},
+    {"ticker": "ACA.PA", "name": "Credit Agricole", "market": "Paris", "sector": "Financials"},
+    {"ticker": "GLE.PA", "name": "Societe Generale", "market": "Paris", "sector": "Financials"},
+    {"ticker": "ENGI.PA", "name": "Engie", "market": "Paris", "sector": "Utilities"},
+    {"ticker": "CAP.PA", "name": "Capgemini", "market": "Paris", "sector": "Technology"},
+    {"ticker": "KER.PA", "name": "Kering", "market": "Paris", "sector": "Consumer Discretionary"},
+    {"ticker": "VIE.PA", "name": "Veolia", "market": "Paris", "sector": "Utilities"},
+    {"ticker": "DG.PA", "name": "Vinci", "market": "Paris", "sector": "Industrials"},
+    {"ticker": "RI.PA", "name": "Pernod Ricard", "market": "Paris", "sector": "Consumer Staples"},
 
-ICB_SEED = {
-    "FR0000120271": "Energy", "FR0000131104": "Financials",
-    "NL0010273215": "Technology", "FR0000121014": "Consumer Discretionary",
-    "FR0000121972": "Technology", "FR0000120578": "Industrials",
-    "FR0000125338": "Consumer Discretionary", "FR0000120073": "Industrials",
-    "FR0000133308": "Consumer Discretionary", "FR0000120321": "Consumer Discretionary",
-    "NL0000235190": "Technology", "FR0000073272": "Technology",
-    "FR0000125007": "Basic Materials", "FR0000124141": "Utilities",
-    "FR0000130809": "Financials", "FR0000045072": "Financials",
-    "NL0000009165": "Industrials", "NL0011821202": "Financials",
-    "NL0012969182": "Technology", "NL0010773842": "Technology",
-    "FR0000131906": "Consumer Staples", "FR0000120693": "Consumer Staples",
-    "FR0000130577": "Financials", "FR0014003TT8": "Energy",
-    "FR0000120644": "Consumer Staples", "FR0000051807": "Telecommunications",
-    "FR0010307819": "Consumer Discretionary", "FR0000125486": "Consumer Discretionary",
-    "IT0003128367": "Energy", "IT0003132476": "Financials",
-    "IT0000072618": "Financials", "IT0005239360": "Telecommunications",
-    "IT0003856405": "Technology", "NO0010096985": "Energy",
-    "NO0005052605": "Energy", "NO0010031479": "Telecommunications",
-    "NO0003054108": "Consumer Staples", "NO0003733800": "Industrials",
-    "PTEDP0AM0009": "Utilities", "PTGAL0AM0009": "Consumer Staples",
-    "PTJMT0AE0001": "Consumer Staples", "PTBCP0AM0015": "Financials",
-    "IE00B4BNMY34": "Basic Materials", "IE0001827041": "Basic Materials",
-    "IE00BDB6Q211": "Industrials", "FR0000120222": "Industrials",
-    "FR0000121485": "Consumer Discretionary", "FR0000125585": "Consumer Discretionary",
-    "FR0000120503": "Consumer Discretionary", "FR0000052292": "Health Care",
-    "FR0000120628": "Industrials", "FR0012435121": "Health Care",
-    "FR0000124711": "Consumer Discretionary", "FR0000121667": "Industrials",
-    "NL0000009538": "Consumer Staples", "NL0011585146": "Financials",
-    "FR0010220475": "Financials", "FR0000131757": "Industrials",
-    "FR0013269123": "Industrials", "FR0010040865": "Industrials",
-    "FR0000130650": "Consumer Staples", "IT0005366767": "Utilities",
-    "IT0003796171": "Financials", "IT0000062072": "Financials",
-    "IT0004781412": "Industrials", "IT0001233417": "Consumer Discretionary",
-    "NO0010345853": "Financials", "NO0003078800": "Financials",
-    "NO0010063308": "Energy", "BE0003565737": "Consumer Staples",
-    "BE0974293251": "Financials", "BE0003739530": "Industrials",
-    "BE0003793107": "Industrials", "BE0974264930": "Health Care",
-    "LU1598757687": "Industrials", "NL0015000IY2": "Consumer Discretionary",
-    "FR0000127771": "Consumer Discretionary",
-}
+    # Amsterdam
+    {"ticker": "ASML.AS", "name": "ASML", "market": "Amsterdam", "sector": "Technology"},
+    {"ticker": "INGA.AS", "name": "ING", "market": "Amsterdam", "sector": "Financials"},
+    {"ticker": "AD.AS", "name": "Ahold Delhaize", "market": "Amsterdam", "sector": "Consumer Staples"},
+    {"ticker": "PHIA.AS", "name": "Philips", "market": "Amsterdam", "sector": "Health Care"},
+    {"ticker": "WKL.AS", "name": "Wolters Kluwer", "market": "Amsterdam", "sector": "Industrials"},
+    {"ticker": "ADYEN.AS", "name": "Adyen", "market": "Amsterdam", "sector": "Technology"},
+    {"ticker": "PRX.AS", "name": "Prosus", "market": "Amsterdam", "sector": "Technology"},
+    {"ticker": "AKZA.AS", "name": "Akzo Nobel", "market": "Amsterdam", "sector": "Basic Materials"},
+    {"ticker": "RAND.AS", "name": "Randstad", "market": "Amsterdam", "sector": "Industrials"},
+    {"ticker": "MT.AS", "name": "ArcelorMittal", "market": "Amsterdam", "sector": "Basic Materials"},
 
+    # Brussels
+    {"ticker": "ABI.BR", "name": "AB InBev", "market": "Brussels", "sector": "Consumer Staples"},
+    {"ticker": "UCB.BR", "name": "UCB", "market": "Brussels", "sector": "Health Care"},
+    {"ticker": "KBC.BR", "name": "KBC", "market": "Brussels", "sector": "Financials"},
+    {"ticker": "SOLB.BR", "name": "Solvay", "market": "Brussels", "sector": "Basic Materials"},
+    {"ticker": "UMI.BR", "name": "Umicore", "market": "Brussels", "sector": "Basic Materials"},
+    {"ticker": "AZE.BR", "name": "Azelis", "market": "Brussels", "sector": "Industrials"},
+    {"ticker": "COFB.BR", "name": "Cofinimmo", "market": "Brussels", "sector": "Real Estate"},
 
-# ═══════════════════════════════════════════════════════════════
-# DATA FETCHING
-# ═══════════════════════════════════════════════════════════════
+    # Lisbon
+    {"ticker": "EDP.LS", "name": "EDP", "market": "Lisbon", "sector": "Utilities"},
+    {"ticker": "GALP.LS", "name": "Galp", "market": "Lisbon", "sector": "Energy"},
+    {"ticker": "JMT.LS", "name": "Jerónimo Martins", "market": "Lisbon", "sector": "Consumer Staples"},
+    {"ticker": "BCP.LS", "name": "BCP", "market": "Lisbon", "sector": "Financials"},
+    {"ticker": "RENE.LS", "name": "REN", "market": "Lisbon", "sector": "Utilities"},
+    {"ticker": "SON.LS", "name": "Sonae", "market": "Lisbon", "sector": "Consumer Staples"},
 
-def _parse_number(val: str | None) -> float:
-    if not val or val.strip() in ("", "-", "N/A", "n/a", "--"):
-        return 0.0
-    val = val.strip().replace("\xa0", "").replace(" ", "")
-    negative = val.startswith("-")
-    val = val.lstrip("-+")
-    if "," in val and "." in val:
-        if val.rindex(",") > val.rindex("."):
-            val = val.replace(".", "").replace(",", ".")
-        else:
-            val = val.replace(",", "")
-    elif "," in val:
-        parts = val.split(",")
-        if len(parts) == 2 and len(parts[1]) <= 3:
-            val = val.replace(",", ".")
-        else:
-            val = val.replace(",", "")
-    try:
-        result = float(val)
-        return -result if negative else result
-    except ValueError:
-        return 0.0
+    # Milan
+    {"ticker": "ENI.MI", "name": "Eni", "market": "Milan", "sector": "Energy"},
+    {"ticker": "ISP.MI", "name": "Intesa Sanpaolo", "market": "Milan", "sector": "Financials"},
+    {"ticker": "UCG.MI", "name": "UniCredit", "market": "Milan", "sector": "Financials"},
+    {"ticker": "ENEL.MI", "name": "Enel", "market": "Milan", "sector": "Utilities"},
+    {"ticker": "STM.MI", "name": "STMicroelectronics", "market": "Milan", "sector": "Technology"},
+    {"ticker": "TIT.MI", "name": "Telecom Italia", "market": "Milan", "sector": "Telecommunications"},
+    {"ticker": "MONC.MI", "name": "Moncler", "market": "Milan", "sector": "Consumer Discretionary"},
+    {"ticker": "G.MI", "name": "Generali", "market": "Milan", "sector": "Financials"},
 
+    # Oslo
+    {"ticker": "EQNR.OL", "name": "Equinor", "market": "Oslo", "sector": "Energy"},
+    {"ticker": "TEL.OL", "name": "Telenor", "market": "Oslo", "sector": "Telecommunications"},
+    {"ticker": "DNB.OL", "name": "DNB Bank", "market": "Oslo", "sector": "Financials"},
+    {"ticker": "MOWI.OL", "name": "Mowi", "market": "Oslo", "sector": "Consumer Staples"},
+    {"ticker": "ORK.OL", "name": "Orkla", "market": "Oslo", "sector": "Consumer Staples"},
+    {"ticker": "YAR.OL", "name": "Yara", "market": "Oslo", "sector": "Basic Materials"},
+    {"ticker": "NHY.OL", "name": "Norsk Hydro", "market": "Oslo", "sector": "Basic Materials"},
 
-def _build_payload(mic: str, start: int = 0, length: int = PAGE_SIZE) -> dict:
-    payload = {
-        "draw": "1",
-        "start": str(start),
-        "length": str(length),
-        "search[value]": "",
-        "search[regex]": "false",
-        "order[0][column]": "5",
-        "order[0][dir]": "desc",
-        "args[initialLetter]": "",
-        "args[fe_type]": "csv",
-        "args[fe_layout]": "col8",
-        "args[fe_page]": "tp_allequities",
-        "args[fe_market]": mic,
-    }
-    for i in range(6):
-        payload[f"columns[{i}][data]"] = str(i)
-        payload[f"columns[{i}][name]"] = ""
-        payload[f"columns[{i}][searchable]"] = "true"
-        payload[f"columns[{i}][orderable]"] = "false"
-        payload[f"columns[{i}][search][value]"] = ""
-        payload[f"columns[{i}][search][regex]"] = "false"
-    return payload
+    # Dublin
+    {"ticker": "CRH.L", "name": "CRH", "market": "Dublin", "sector": "Basic Materials"},
+    {"ticker": "RYAAY", "name": "Ryanair ADR", "market": "Dublin", "sector": "Industrials"},
+    {"ticker": "A5G.IR", "name": "AIB Group", "market": "Dublin", "sector": "Financials"},
+    {"ticker": "KRX.IR", "name": "Kerry Group", "market": "Dublin", "sector": "Consumer Staples"},
+    {"ticker": "GL9.IR", "name": "Glanbia", "market": "Dublin", "sector": "Consumer Staples"},
+]
 
-
-def _parse_row(row: list, market_name: str, mic: str, currency: str) -> dict | None:
-    try:
-        if not isinstance(row, list) or len(row) < 6:
-            return None
-
-        def strip_html(html_str):
-            s = BeautifulSoup(str(html_str), "html.parser")
-            return s.get_text(strip=True)
-
-        def extract_link_text(html_str):
-            s = BeautifulSoup(str(html_str), "html.parser")
-            a = s.find("a")
-            return a.get_text(strip=True) if a else s.get_text(strip=True)
-
-        name = extract_link_text(row[0])
-        isin = strip_html(row[1]) if len(row) > 1 else ""
-        symbol = strip_html(row[2]) if len(row) > 2 else ""
-        last_price = _parse_number(strip_html(row[4])) if len(row) > 4 else 0
-        change_pct = _parse_number(strip_html(row[5]).replace("%", "")) if len(row) > 5 else 0
-        volume = _parse_number(strip_html(row[6])) if len(row) > 6 else 0
-        turnover = _parse_number(strip_html(row[7])) if len(row) > 7 else 0
-
-        if turnover == 0 and last_price > 0 and volume > 0:
-            turnover = last_price * volume
-
-        turnover_eur = turnover * NOK_EUR_RATE if currency == "NOK" else turnover
-
-        sector = ICB_SEED.get(isin, "Other")
-
-        return {
-            "name": name, "isin": isin, "symbol": symbol,
-            "market": market_name, "mic": mic, "currency": currency,
-            "last_price": last_price, "change_pct": change_pct,
-            "volume": volume, "turnover": turnover_eur, "sector": sector,
-        }
-    except Exception:
-        return None
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def fetch_market_data(market_name: str, mic: str, currency: str) -> list[dict]:
-    """Fetch all equities for one Euronext market. Cached 10 min."""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "en-US,en;q=0.9",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"{BASE_URL}/en/products/equities/list",
-        "Origin": BASE_URL,
-    })
-
-    try:
-        session.get(f"{BASE_URL}/en/products/equities/list", timeout=REQUEST_TIMEOUT)
-    except Exception:
-        pass
-
-    instruments = []
-    for page in range(MAX_PAGES):
-        try:
-            payload = _build_payload(mic, start=page * PAGE_SIZE)
-            resp = session.post(
-                f"{BASE_URL}/en/pd_es/data/stocks",
-                data=payload, timeout=REQUEST_TIMEOUT,
-            )
-            if resp.status_code != 200:
-                break
-            data = resp.json()
-            rows = data.get("data", [])
-            if not rows:
-                break
-            for row in rows:
-                inst = _parse_row(row, market_name, mic, currency)
-                if inst and inst["name"]:
-                    instruments.append(inst)
-            total = data.get("recordsTotal", 0)
-            if (page + 1) * PAGE_SIZE >= total:
-                break
-        except Exception:
-            break
-        time.sleep(0.3)
-
-    return instruments
-
-
-def fetch_all() -> pd.DataFrame:
-    """Fetch all markets and return a combined DataFrame."""
-    all_instruments = []
-    statuses = {}
-    progress = st.progress(0, text="Connecting to Euronext Live…")
-
-    market_list = list(MARKETS.items())
-    for i, (name, cfg) in enumerate(market_list):
-        progress.progress(
-            (i) / len(market_list),
-            text=f"Fetching {cfg['flag']} {name}…",
-        )
-        try:
-            instruments = fetch_market_data(name, cfg["mic"], cfg["currency"])
-            all_instruments.extend(instruments)
-            statuses[name] = len(instruments)
-        except Exception as e:
-            statuses[name] = 0
-
-    progress.progress(1.0, text="Data loaded.")
-    time.sleep(0.4)
-    progress.empty()
-
-    if all_instruments:
-        df = pd.DataFrame(all_instruments)
-    else:
-        df = pd.DataFrame()
-
-    return df, statuses
+REQUEST_TIMEOUT = 15
 
 
 # ═══════════════════════════════════════════════════════════════
-# FORMATTING HELPERS
+# HELPERS
 # ═══════════════════════════════════════════════════════════════
 
 def fmt_eur(val: float) -> str:
@@ -258,7 +116,6 @@ def fmt_eur(val: float) -> str:
         return f"€{val / 1e3:,.0f}K"
     return f"€{val:,.0f}"
 
-
 def fmt_vol(val: float) -> str:
     if abs(val) >= 1e9:
         return f"{val / 1e9:,.2f}B"
@@ -268,366 +125,123 @@ def fmt_vol(val: float) -> str:
         return f"{val / 1e3:,.0f}K"
     return f"{val:,.0f}"
 
-
 def fmt_pct(val: float) -> str:
     sign = "+" if val > 0 else ""
     return f"{sign}{val:.2f}%"
 
-
-# ═══════════════════════════════════════════════════════════════
-# PLOTLY THEME
-# ═══════════════════════════════════════════════════════════════
-
-PALETTE = {
-    "bg": "rgba(0,0,0,0)",
-    "grid": "rgba(148,163,184,0.06)",
-    "text": "#94a3b8",
-    "text_bright": "#e2e8f0",
-    "blue": "#6ea8fe",
-    "green": "#63e6be",
-    "red": "#ff8787",
-    "amber": "#ffd43b",
-    "muted": "#475569",
-    "series": ["#6ea8fe", "#63e6be", "#ffd43b", "#ff8787", "#c084fc", "#f472b6", "#38bdf8"],
-}
-
-
-def apply_theme(fig, height=380):
-    fig.update_layout(
-        paper_bgcolor=PALETTE["bg"],
-        plot_bgcolor=PALETTE["bg"],
-        font=dict(family="'Söhne', 'Helvetica Neue', Helvetica, sans-serif", color=PALETTE["text"], size=12),
-        margin=dict(l=0, r=0, t=36, b=0),
-        height=height,
-        xaxis=dict(gridcolor=PALETTE["grid"], zerolinecolor=PALETTE["grid"], showline=False),
-        yaxis=dict(gridcolor=PALETTE["grid"], zerolinecolor=PALETTE["grid"], showline=False),
-        colorway=PALETTE["series"],
-        legend=dict(
-            bgcolor="rgba(0,0,0,0)",
-            borderwidth=0,
-            font=dict(size=11, color=PALETTE["text"]),
-            orientation="h",
-            yanchor="bottom", y=1.02,
-            xanchor="left", x=0,
-        ),
-        hoverlabel=dict(
-            bgcolor="#1e293b",
-            bordercolor="#334155",
-            font_size=12,
-            font_color="#e2e8f0",
-        ),
-    )
-    return fig
+def ping_internet() -> bool:
+    try:
+        requests.get("https://query1.finance.yahoo.com", timeout=REQUEST_TIMEOUT)
+        return True
+    except Exception:
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════
-# PAGE SETUP & CSS
+# DATA FETCHING
+# ═══════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_all_data():
+    universe_df = pd.DataFrame(UNIVERSE)
+    tickers = universe_df["ticker"].tolist()
+
+    try:
+        data = yf.download(
+            tickers=tickers,
+            period="1d",
+            interval="1m",
+            group_by="ticker",
+            auto_adjust=False,
+            threads=True,
+            progress=False,
+        )
+    except Exception:
+        return pd.DataFrame()
+
+    rows = []
+
+    for item in UNIVERSE:
+        ticker = item["ticker"]
+        try:
+            if ticker not in data.columns.get_level_values(0):
+                continue
+
+            tdf = data[ticker].copy()
+            tdf = tdf.dropna(how="all")
+            if tdf.empty:
+                continue
+
+            last_price = float(tdf["Close"].dropna().iloc[-1]) if "Close" in tdf else 0.0
+            prev_close = float(tdf["Close"].dropna().iloc[0]) if "Close" in tdf else 0.0
+            volume = float(tdf["Volume"].fillna(0).sum()) if "Volume" in tdf else 0.0
+
+            if last_price <= 0 and prev_close <= 0:
+                continue
+
+            change_pct = ((last_price / prev_close) - 1) * 100 if prev_close > 0 else 0.0
+            turnover = last_price * volume
+
+            rows.append({
+                "ticker": ticker,
+                "name": item["name"],
+                "market": item["market"],
+                "sector": item["sector"],
+                "last_price": last_price,
+                "change_pct": change_pct,
+                "volume": volume,
+                "turnover": turnover,
+            })
+        except Exception:
+            continue
+
+    return pd.DataFrame(rows)
+
+
+# ═══════════════════════════════════════════════════════════════
+# PAGE SETUP
 # ═══════════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="Euronext Activity",
+    page_title="Euronext Activity Monitor",
     page_icon="◆",
     layout="wide",
-    initial_sidebar_state="collapsed",
 )
 
-st.markdown("""
-<style>
-    /* ── Foundations ────────────────────────────────── */
-    @import url('https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
-
-    :root {
-        --c-bg:       #0b0f19;
-        --c-surface:  #111827;
-        --c-surface2: #161f30;
-        --c-border:   rgba(148,163,184,0.08);
-        --c-border-h: rgba(148,163,184,0.15);
-        --c-text:     #e2e8f0;
-        --c-text-2:   #94a3b8;
-        --c-text-3:   #64748b;
-        --c-blue:     #6ea8fe;
-        --c-green:    #63e6be;
-        --c-red:      #ff8787;
-        --c-amber:    #ffd43b;
-        --radius:     10px;
-    }
-
-    html, body, [data-testid="stAppViewContainer"],
-    [data-testid="stApp"] {
-        font-family: 'Instrument Sans', 'Helvetica Neue', Helvetica, sans-serif;
-    }
-
-    .main .block-container {
-        padding: 1.4rem 2rem 2rem 2rem;
-        max-width: 1360px;
-    }
-
-    /* Kill Streamlit chrome */
-    #MainMenu, footer, header[data-testid="stHeader"] { display: none !important; }
-
-    /* ── Header bar ────────────────────────────────── */
-    .hdr {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        margin-bottom: 1.6rem;
-        flex-wrap: wrap;
-        gap: 8px;
-    }
-    .hdr-title {
-        font-size: 1.35rem;
-        font-weight: 700;
-        color: var(--c-text);
-        letter-spacing: -0.02em;
-    }
-    .hdr-title span {
-        color: var(--c-blue);
-    }
-    .hdr-meta {
-        font-size: 0.76rem;
-        color: var(--c-text-3);
-        font-family: 'IBM Plex Mono', monospace;
-    }
-
-    /* ── KPI row ───────────────────────────────────── */
-    .kpi-row {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 12px;
-        margin-bottom: 1.5rem;
-    }
-    .kpi {
-        background: var(--c-surface);
-        border: 1px solid var(--c-border);
-        border-radius: var(--radius);
-        padding: 18px 20px 16px;
-        transition: border-color 0.15s;
-    }
-    .kpi:hover { border-color: var(--c-border-h); }
-    .kpi-label {
-        font-size: 0.68rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.07em;
-        color: var(--c-text-3);
-        margin-bottom: 6px;
-    }
-    .kpi-val {
-        font-size: 1.55rem;
-        font-weight: 700;
-        color: var(--c-text);
-        letter-spacing: -0.02em;
-        line-height: 1.15;
-    }
-    .kpi-sub {
-        font-size: 0.72rem;
-        font-weight: 500;
-        margin-top: 3px;
-        font-family: 'IBM Plex Mono', monospace;
-    }
-    .kpi-sub.up   { color: var(--c-green); }
-    .kpi-sub.down { color: var(--c-red); }
-    .kpi-sub.flat { color: var(--c-text-3); }
-
-    /* ── Section label ─────────────────────────────── */
-    .sec {
-        font-size: 0.72rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.1em;
-        color: var(--c-text-3);
-        margin: 2rem 0 0.85rem 0;
-        padding-bottom: 6px;
-        border-bottom: 1px solid var(--c-border);
-    }
-
-    /* ── Market cards grid ─────────────────────────── */
-    .mkt-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-        gap: 12px;
-        margin-bottom: 0.5rem;
-    }
-    .mkt {
-        background: var(--c-surface);
-        border: 1px solid var(--c-border);
-        border-radius: var(--radius);
-        padding: 16px 18px;
-        transition: border-color 0.15s;
-    }
-    .mkt:hover { border-color: var(--c-border-h); }
-
-    .mkt-head {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 12px;
-    }
-    .mkt-name {
-        font-size: 0.88rem;
-        font-weight: 600;
-        color: var(--c-text);
-    }
-    .mkt-count {
-        font-size: 0.68rem;
-        color: var(--c-text-3);
-        font-family: 'IBM Plex Mono', monospace;
-    }
-    .mkt-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: baseline;
-        padding: 3px 0;
-    }
-    .mkt-lbl {
-        font-size: 0.7rem;
-        color: var(--c-text-3);
-    }
-    .mkt-v {
-        font-size: 0.82rem;
-        font-weight: 600;
-        color: var(--c-text-2);
-        font-family: 'IBM Plex Mono', monospace;
-    }
-    .bar-track {
-        height: 3px;
-        background: var(--c-border);
-        border-radius: 2px;
-        margin-top: 10px;
-        overflow: hidden;
-    }
-    .bar-fill {
-        height: 100%;
-        border-radius: 2px;
-        background: linear-gradient(90deg, var(--c-blue), #c084fc);
-        transition: width 0.6s ease;
-    }
-
-    /* ── Empty state ───────────────────────────────── */
-    .empty-state {
-        text-align: center;
-        padding: 4rem 2rem;
-        color: var(--c-text-3);
-    }
-    .empty-state h3 {
-        font-size: 1.15rem;
-        font-weight: 600;
-        color: var(--c-text-2);
-        margin-bottom: 0.5rem;
-    }
-    .empty-state p {
-        font-size: 0.85rem;
-        max-width: 420px;
-        margin: 0 auto;
-        line-height: 1.6;
-    }
-
-    /* ── Tables ────────────────────────────────────── */
-    [data-testid="stDataFrame"] {
-        border: 1px solid var(--c-border) !important;
-        border-radius: var(--radius) !important;
-        overflow: hidden;
-    }
-
-    /* ── Sidebar ───────────────────────────────────── */
-    [data-testid="stSidebar"] {
-        background: #0a0e17;
-    }
-    [data-testid="stSidebar"] [data-testid="stMarkdown"] p {
-        font-size: 0.82rem;
-    }
-
-    /* ── Tabs ──────────────────────────────────────── */
-    .stTabs [data-baseweb="tab-list"] { gap: 4px; }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px 8px 0 0;
-        font-size: 0.8rem;
-        font-weight: 500;
-        letter-spacing: 0.01em;
-        padding: 10px 18px;
-    }
-    .stTabs [data-baseweb="tab-highlight"] {
-        background-color: var(--c-blue);
-    }
-
-    /* ── Misc polish ──────────────────────────────── */
-    hr { border-color: var(--c-border); }
-    .stButton > button {
-        border-radius: 8px;
-        font-weight: 500;
-        font-size: 0.78rem;
-        letter-spacing: 0.01em;
-    }
-    .stProgress > div > div {
-        background-color: var(--c-blue) !important;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ═══════════════════════════════════════════════════════════════
-# DATA LOADING
-# ═══════════════════════════════════════════════════════════════
+st.title("◆ Euronext Activity Monitor")
+st.caption("Yahoo Finance proxy · broad-universe approximation of activity by Euronext market")
 
 if "df" not in st.session_state:
     st.session_state.df = pd.DataFrame()
-    st.session_state.statuses = {}
     st.session_state.last_fetch = None
 
-
-def load_data():
-    df, statuses = fetch_all()
-    st.session_state.df = df
-    st.session_state.statuses = statuses
-    st.session_state.last_fetch = datetime.now(timezone.utc)
-
-
-# ── Header ──────────────────────────────────────────────────
-col_h1, col_h2 = st.columns([5, 1])
-with col_h1:
-    ts_str = ""
-    if st.session_state.last_fetch:
-        ts_str = st.session_state.last_fetch.strftime("%H:%M:%S UTC · %d %b %Y")
-    st.markdown(f"""
-    <div class="hdr">
-        <div class="hdr-title">◆ Euronext <span>Activity Monitor</span></div>
-        <div class="hdr-meta">{ts_str}</div>
-    </div>
-    """, unsafe_allow_html=True)
-with col_h2:
-    if st.button("⟳ Refresh data", use_container_width=True, type="primary"):
+col_a, col_b = st.columns([5, 1])
+with col_b:
+    if st.button("Refresh data", use_container_width=True):
         st.cache_data.clear()
-        load_data()
-        st.rerun()
+        st.session_state.df = fetch_all_data()
+        st.session_state.last_fetch = datetime.now(timezone.utc)
 
-# Auto-load on first visit
-if st.session_state.df.empty and st.session_state.last_fetch is None:
-    load_data()
-    st.rerun()
+if st.session_state.df.empty:
+    with st.spinner("Loading market data…"):
+        st.session_state.df = fetch_all_data()
+        st.session_state.last_fetch = datetime.now(timezone.utc)
 
 df = st.session_state.df
-statuses = st.session_state.statuses
 
-# ═══════════════════════════════════════════════════════════════
-# EMPTY STATE
-# ═══════════════════════════════════════════════════════════════
+if st.session_state.last_fetch:
+    st.caption(f"Last refresh: {st.session_state.last_fetch.strftime('%H:%M:%S UTC · %d %b %Y')}")
 
 if df.empty:
-    st.markdown("""
-    <div class="empty-state">
-        <h3>No data available right now</h3>
-        <p>
-            The Euronext Live endpoints could not be reached at the moment.
-            This may happen outside market hours or if the service is temporarily
-            unavailable. Try refreshing in a few minutes.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
+    if not ping_internet():
+        st.error("No data available. The app could not reach Yahoo Finance.")
+    else:
+        st.error("No data available right now from Yahoo Finance for the current ticker universe.")
     st.stop()
 
 
 # ═══════════════════════════════════════════════════════════════
-# COMPUTE AGGREGATES
+# AGGREGATES
 # ═══════════════════════════════════════════════════════════════
 
 total_turnover = df["turnover"].sum()
@@ -635,326 +249,175 @@ total_volume = df["volume"].sum()
 total_instruments = len(df)
 markets_active = df["market"].nunique()
 
-# Weighted average change
 df["weight"] = df["turnover"] / total_turnover if total_turnover > 0 else 0
 weighted_chg = (df["change_pct"] * df["weight"]).sum()
 
-# Per-market
-mkt_agg = df.groupby("market").agg(
-    turnover=("turnover", "sum"),
-    volume=("volume", "sum"),
-    count=("isin", "count"),
-    avg_chg=("change_pct", "mean"),
-).reset_index().sort_values("turnover", ascending=False)
-mkt_agg["share"] = (mkt_agg["turnover"] / total_turnover * 100) if total_turnover > 0 else 0
+market_agg = (
+    df.groupby("market", as_index=False)
+      .agg(
+          turnover=("turnover", "sum"),
+          volume=("volume", "sum"),
+          count=("ticker", "count"),
+          avg_chg=("change_pct", "mean"),
+      )
+      .sort_values("turnover", ascending=False)
+)
+market_agg["share"] = market_agg["turnover"] / total_turnover * 100 if total_turnover > 0 else 0
 
-# Per-sector
-sec_agg = df.groupby("sector").agg(
-    turnover=("turnover", "sum"),
-    volume=("volume", "sum"),
-    count=("isin", "count"),
-    avg_chg=("change_pct", "mean"),
-).reset_index().sort_values("turnover", ascending=False)
-sec_agg["share"] = (sec_agg["turnover"] / total_turnover * 100) if total_turnover > 0 else 0
-
-
-# ═══════════════════════════════════════════════════════════════
-# 1 · KPI CARDS
-# ═══════════════════════════════════════════════════════════════
-
-chg_class = "up" if weighted_chg > 0.01 else ("down" if weighted_chg < -0.01 else "flat")
-
-st.markdown(f"""
-<div class="kpi-row">
-    <div class="kpi">
-        <div class="kpi-label">Total Turnover</div>
-        <div class="kpi-val">{fmt_eur(total_turnover)}</div>
-        <div class="kpi-sub {chg_class}">Weighted avg chg {fmt_pct(weighted_chg)}</div>
-    </div>
-    <div class="kpi">
-        <div class="kpi-label">Total Volume</div>
-        <div class="kpi-val">{fmt_vol(total_volume)}</div>
-        <div class="kpi-sub flat">{total_instruments:,} securities</div>
-    </div>
-    <div class="kpi">
-        <div class="kpi-label">Active Securities</div>
-        <div class="kpi-val">{total_instruments:,}</div>
-        <div class="kpi-sub flat">across {markets_active} markets</div>
-    </div>
-    <div class="kpi">
-        <div class="kpi-label">Markets Reporting</div>
-        <div class="kpi-val">{markets_active}<span style="font-size:0.85rem;font-weight:400;color:var(--c-text-3)"> / {len(MARKETS)}</span></div>
-        <div class="kpi-sub flat">Delayed ~15 min</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+sector_agg = (
+    df.groupby("sector", as_index=False)
+      .agg(
+          turnover=("turnover", "sum"),
+          volume=("volume", "sum"),
+          count=("ticker", "count"),
+          avg_chg=("change_pct", "mean"),
+      )
+      .sort_values("turnover", ascending=False)
+)
+sector_agg["share"] = sector_agg["turnover"] / total_turnover * 100 if total_turnover > 0 else 0
 
 
 # ═══════════════════════════════════════════════════════════════
-# 2 · MARKET BREAKDOWN
+# KPI ROW
 # ═══════════════════════════════════════════════════════════════
 
-st.markdown('<div class="sec">Market breakdown</div>', unsafe_allow_html=True)
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total Turnover", fmt_eur(total_turnover))
+c2.metric("Total Volume", fmt_vol(total_volume))
+c3.metric("Tracked Securities", f"{total_instruments:,}")
+c4.metric("Markets Reporting", f"{markets_active} / {len(MARKETS)}")
 
-cards = '<div class="mkt-grid">'
-for _, row in mkt_agg.iterrows():
-    mkt_name = row["market"]
-    flag = MARKETS.get(mkt_name, {}).get("flag", "🏛️")
-    share = row["share"]
-    chg = row["avg_chg"]
-    chg_c = "up" if chg > 0.01 else ("down" if chg < -0.01 else "flat")
-
-    cards += f"""
-    <div class="mkt">
-        <div class="mkt-head">
-            <div class="mkt-name">{flag} {mkt_name}</div>
-            <div class="mkt-count">{int(row['count']):,} sec</div>
-        </div>
-        <div class="mkt-row">
-            <span class="mkt-lbl">Turnover</span>
-            <span class="mkt-v">{fmt_eur(row['turnover'])}</span>
-        </div>
-        <div class="mkt-row">
-            <span class="mkt-lbl">Volume</span>
-            <span class="mkt-v">{fmt_vol(row['volume'])}</span>
-        </div>
-        <div class="mkt-row">
-            <span class="mkt-lbl">Share</span>
-            <span class="mkt-v">{share:.1f}%</span>
-        </div>
-        <div class="mkt-row">
-            <span class="mkt-lbl">Avg chg</span>
-            <span class="mkt-v kpi-sub {chg_c}">{fmt_pct(chg)}</span>
-        </div>
-        <div class="bar-track"><div class="bar-fill" style="width:{min(share, 100):.1f}%"></div></div>
-    </div>
-    """
-
-# Add cards for markets that returned zero data
-for mkt_name, cfg in MARKETS.items():
-    if mkt_name not in mkt_agg["market"].values:
-        cards += f"""
-        <div class="mkt" style="opacity:0.4">
-            <div class="mkt-head">
-                <div class="mkt-name">{cfg['flag']} {mkt_name}</div>
-                <div class="mkt-count">—</div>
-            </div>
-            <div class="mkt-row">
-                <span class="mkt-lbl">Status</span>
-                <span class="mkt-v" style="color:var(--c-text-3)">No data</span>
-            </div>
-            <div class="bar-track"><div class="bar-fill" style="width:0%"></div></div>
-        </div>
-        """
-
-cards += '</div>'
-st.markdown(cards, unsafe_allow_html=True)
+delta_text = f"Weighted avg change: {fmt_pct(weighted_chg)}"
+st.caption(delta_text)
 
 
 # ═══════════════════════════════════════════════════════════════
-# TABS
+# MARKET BREAKDOWN
 # ═══════════════════════════════════════════════════════════════
 
-tab_charts, tab_sectors, tab_tables = st.tabs(["Charts", "Sectors", "Tables"])
+st.subheader("Market breakdown")
 
+display_market = market_agg.copy()
+display_market["flag"] = display_market["market"].map(lambda x: MARKETS.get(x, {}).get("flag", "🏛️"))
+display_market["market"] = display_market["flag"] + " " + display_market["market"]
+display_market["turnover_fmt"] = display_market["turnover"].map(fmt_eur)
+display_market["volume_fmt"] = display_market["volume"].map(fmt_vol)
+display_market["share_fmt"] = display_market["share"].map(lambda x: f"{x:.1f}%")
+display_market["avg_chg_fmt"] = display_market["avg_chg"].map(fmt_pct)
 
-# ── Tab 1: Charts ───────────────────────────────────────────
-with tab_charts:
-    st.markdown('<div class="sec">Turnover distribution</div>', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
+st.dataframe(
+    display_market[["market", "count", "turnover_fmt", "volume_fmt", "share_fmt", "avg_chg_fmt"]]
+        .rename(columns={
+            "market": "Market",
+            "count": "Securities",
+            "turnover_fmt": "Turnover",
+            "volume_fmt": "Volume",
+            "share_fmt": "Share",
+            "avg_chg_fmt": "Avg Chg",
+        }),
+    use_container_width=True,
+    hide_index=True,
+)
 
-    with c1:
-        fig = px.bar(
-            mkt_agg, x="market", y="turnover",
-            color="market", text_auto=".2s",
-            labels={"turnover": "Turnover (€)", "market": ""},
-        )
-        fig.update_traces(textposition="outside", textfont_size=11, marker_line_width=0)
-        fig.update_layout(showlegend=False, title_text="Turnover by Market", title_font_size=14)
-        apply_theme(fig)
-        st.plotly_chart(fig, use_container_width=True, key="bar_mkt")
+fig_market = px.bar(
+    market_agg,
+    x="market",
+    y="turnover",
+    color="market",
+    text_auto=".2s",
+    title="Turnover by Market",
+)
+fig_market.update_layout(showlegend=False)
+st.plotly_chart(fig_market, use_container_width=True)
 
-    with c2:
-        fig = px.pie(
-            mkt_agg, values="turnover", names="market",
-            hole=0.55,
-        )
-        fig.update_traces(
-            textposition="inside", textinfo="percent+label",
-            textfont_size=11,
-            marker=dict(line=dict(color="#0b0f19", width=2)),
-        )
-        fig.update_layout(title_text="Market share", title_font_size=14)
-        apply_theme(fig, height=380)
-        st.plotly_chart(fig, use_container_width=True, key="pie_mkt")
-
-    st.markdown('<div class="sec">Volume distribution</div>', unsafe_allow_html=True)
-    c3, c4 = st.columns(2)
-
-    with c3:
-        fig = px.bar(
-            mkt_agg, x="market", y="volume",
-            color="market", text_auto=".2s",
-            labels={"volume": "Volume", "market": ""},
-        )
-        fig.update_traces(textposition="outside", textfont_size=11, marker_line_width=0)
-        fig.update_layout(showlegend=False, title_text="Volume by Market", title_font_size=14)
-        apply_theme(fig)
-        st.plotly_chart(fig, use_container_width=True, key="bar_vol")
-
-    with c4:
-        # Scatter: turnover vs volume per market
-        fig = px.scatter(
-            mkt_agg, x="volume", y="turnover",
-            size="count", color="market",
-            text="market",
-            labels={"turnover": "Turnover (€)", "volume": "Volume", "count": "Securities"},
-        )
-        fig.update_traces(textposition="top center", textfont_size=10)
-        fig.update_layout(title_text="Turnover vs Volume", title_font_size=14, showlegend=False)
-        apply_theme(fig)
-        st.plotly_chart(fig, use_container_width=True, key="scatter_mkt")
-
-
-# ── Tab 2: Sectors ──────────────────────────────────────────
-with tab_sectors:
-    st.markdown('<div class="sec">Sector activity</div>', unsafe_allow_html=True)
-
-    # Filter out "Other" for cleaner view if many sectors exist
-    sec_display = sec_agg[sec_agg["sector"] != "Other"].head(12)
-
-    if not sec_display.empty:
-        c1, c2 = st.columns(2)
-        with c1:
-            fig = px.bar(
-                sec_display, x="turnover", y="sector",
-                orientation="h", color="turnover",
-                color_continuous_scale=["#1e3a5f", "#6ea8fe", "#c084fc"],
-                labels={"turnover": "Turnover (€)", "sector": ""},
-            )
-            fig.update_layout(
-                title_text="Turnover by Sector", title_font_size=14,
-                yaxis=dict(autorange="reversed"),
-                coloraxis_showscale=False,
-            )
-            fig.update_traces(marker_line_width=0)
-            apply_theme(fig, height=420)
-            st.plotly_chart(fig, use_container_width=True, key="sec_bar")
-
-        with c2:
-            fig = px.pie(
-                sec_display.head(8), values="turnover", names="sector",
-                hole=0.55,
-            )
-            fig.update_traces(
-                textposition="inside", textinfo="percent+label",
-                textfont_size=10,
-                marker=dict(line=dict(color="#0b0f19", width=2)),
-            )
-            fig.update_layout(title_text="Sector share", title_font_size=14)
-            apply_theme(fig, height=420)
-            st.plotly_chart(fig, use_container_width=True, key="sec_pie")
-
-        # Sector table
-        st.markdown('<div class="sec">Sector summary</div>', unsafe_allow_html=True)
-        sec_table = sec_agg[["sector", "count", "turnover", "volume", "share", "avg_chg"]].copy()
-        sec_table.columns = ["Sector", "Securities", "Turnover", "Volume", "Share %", "Avg Chg %"]
-        sec_table["Turnover"] = sec_table["Turnover"].apply(fmt_eur)
-        sec_table["Volume"] = sec_table["Volume"].apply(fmt_vol)
-        sec_table["Share %"] = sec_table["Share %"].apply(lambda x: f"{x:.1f}%")
-        sec_table["Avg Chg %"] = sec_table["Avg Chg %"].apply(fmt_pct)
-        st.dataframe(sec_table, use_container_width=True, hide_index=True, height=440)
-    else:
-        st.markdown("""
-        <div class="empty-state">
-            <h3>Sector data is limited</h3>
-            <p>ICB sector mapping covers major blue chips. Unmapped securities
-            appear under "Other". Coverage improves as the mapping file grows.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-
-# ── Tab 3: Tables ───────────────────────────────────────────
-with tab_tables:
-    st.markdown('<div class="sec">Top securities by turnover</div>', unsafe_allow_html=True)
-
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-        mkt_options = ["All"] + sorted(df["market"].unique().tolist())
-        mkt_filter = st.selectbox("Market", mkt_options, label_visibility="collapsed")
-    with col_f2:
-        sec_options = ["All"] + sorted(df["sector"].unique().tolist())
-        sec_filter = st.selectbox("Sector", sec_options, label_visibility="collapsed")
-
-    filtered = df.copy()
-    if mkt_filter != "All":
-        filtered = filtered[filtered["market"] == mkt_filter]
-    if sec_filter != "All":
-        filtered = filtered[filtered["sector"] == sec_filter]
-
-    top_turnover = filtered.nlargest(60, "turnover")[
-        ["name", "symbol", "market", "last_price", "change_pct", "volume", "turnover", "sector"]
-    ].copy()
-    top_turnover.columns = ["Name", "Symbol", "Market", "Last (€)", "Chg %", "Volume", "Turnover (€)", "Sector"]
-
-    st.dataframe(
-        top_turnover.style
-            .format({"Last (€)": "{:.2f}", "Chg %": "{:+.2f}%", "Volume": "{:,.0f}", "Turnover (€)": "€{:,.0f}"})
-            .map(
-                lambda v: "color: #63e6be" if isinstance(v, (int, float)) and v > 0
-                          else ("color: #ff8787" if isinstance(v, (int, float)) and v < 0 else ""),
-                subset=["Chg %"]
-            ),
-        use_container_width=True,
-        hide_index=True,
-        height=540,
-    )
-
-    st.markdown('<div class="sec">Top movers</div>', unsafe_allow_html=True)
-
-    # Top gainers and losers among liquid names
-    liquid = filtered[filtered["turnover"] > filtered["turnover"].quantile(0.25)] if len(filtered) > 20 else filtered
-    c1, c2 = st.columns(2)
-
-    with c1:
-        gainers = liquid.nlargest(15, "change_pct")[["name", "symbol", "market", "change_pct", "turnover"]].copy()
-        gainers.columns = ["Name", "Symbol", "Market", "Chg %", "Turnover (€)"]
-        if not gainers.empty:
-            fig = px.bar(
-                gainers.head(12), x="Symbol", y="Chg %",
-                color="Chg %",
-                color_continuous_scale=["#1e3a5f", "#63e6be"],
-                text="Chg %",
-            )
-            fig.update_traces(texttemplate="%{text:+.1f}%", textposition="outside", textfont_size=10, marker_line_width=0)
-            fig.update_layout(title_text="Top Gainers", title_font_size=14, coloraxis_showscale=False)
-            apply_theme(fig, height=340)
-            st.plotly_chart(fig, use_container_width=True, key="gainers")
-
-    with c2:
-        losers = liquid.nsmallest(15, "change_pct")[["name", "symbol", "market", "change_pct", "turnover"]].copy()
-        losers.columns = ["Name", "Symbol", "Market", "Chg %", "Turnover (€)"]
-        if not losers.empty:
-            fig = px.bar(
-                losers.head(12), x="Symbol", y="Chg %",
-                color="Chg %",
-                color_continuous_scale=["#ff8787", "#1e3a5f"],
-                text="Chg %",
-            )
-            fig.update_traces(texttemplate="%{text:+.1f}%", textposition="outside", textfont_size=10, marker_line_width=0)
-            fig.update_layout(title_text="Top Decliners", title_font_size=14, coloraxis_showscale=False)
-            apply_theme(fig, height=340)
-            st.plotly_chart(fig, use_container_width=True, key="losers")
+fig_market_share = px.pie(
+    market_agg,
+    values="turnover",
+    names="market",
+    hole=0.5,
+    title="Market Share of Total Turnover",
+)
+st.plotly_chart(fig_market_share, use_container_width=True)
 
 
 # ═══════════════════════════════════════════════════════════════
-# FOOTER
+# SECTOR BREAKDOWN
 # ═══════════════════════════════════════════════════════════════
+
+st.subheader("Sector breakdown")
+
+display_sector = sector_agg.copy()
+display_sector["turnover_fmt"] = display_sector["turnover"].map(fmt_eur)
+display_sector["volume_fmt"] = display_sector["volume"].map(fmt_vol)
+display_sector["share_fmt"] = display_sector["share"].map(lambda x: f"{x:.1f}%")
+display_sector["avg_chg_fmt"] = display_sector["avg_chg"].map(fmt_pct)
+
+st.dataframe(
+    display_sector[["sector", "count", "turnover_fmt", "volume_fmt", "share_fmt", "avg_chg_fmt"]]
+        .rename(columns={
+            "sector": "Sector",
+            "count": "Securities",
+            "turnover_fmt": "Turnover",
+            "volume_fmt": "Volume",
+            "share_fmt": "Share",
+            "avg_chg_fmt": "Avg Chg",
+        }),
+    use_container_width=True,
+    hide_index=True,
+)
+
+fig_sector = px.bar(
+    sector_agg.head(12),
+    x="turnover",
+    y="sector",
+    orientation="h",
+    color="turnover",
+    title="Top Sectors by Turnover",
+)
+fig_sector.update_layout(yaxis={"categoryorder": "total ascending"})
+st.plotly_chart(fig_sector, use_container_width=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# TOP SECURITIES
+# ═══════════════════════════════════════════════════════════════
+
+st.subheader("Top securities")
+
+market_filter = st.selectbox("Filter by market", ["All"] + sorted(df["market"].unique().tolist()))
+sector_filter = st.selectbox("Filter by sector", ["All"] + sorted(df["sector"].unique().tolist()))
+
+filtered = df.copy()
+if market_filter != "All":
+    filtered = filtered[filtered["market"] == market_filter]
+if sector_filter != "All":
+    filtered = filtered[filtered["sector"] == sector_filter]
+
+top_turnover = filtered.sort_values("turnover", ascending=False).copy()
+top_turnover["turnover_fmt"] = top_turnover["turnover"].map(fmt_eur)
+top_turnover["volume_fmt"] = top_turnover["volume"].map(fmt_vol)
+top_turnover["change_fmt"] = top_turnover["change_pct"].map(fmt_pct)
+top_turnover["last_price_fmt"] = top_turnover["last_price"].map(lambda x: f"{x:,.2f}")
+
+st.dataframe(
+    top_turnover[["name", "ticker", "market", "sector", "last_price_fmt", "change_fmt", "volume_fmt", "turnover_fmt"]]
+        .rename(columns={
+            "name": "Name",
+            "ticker": "Ticker",
+            "market": "Market",
+            "sector": "Sector",
+            "last_price_fmt": "Last",
+            "change_fmt": "Chg %",
+            "volume_fmt": "Volume",
+            "turnover_fmt": "Turnover",
+        }),
+    use_container_width=True,
+    hide_index=True,
+    height=500,
+)
 
 st.markdown("---")
-st.markdown(
-    '<div style="text-align:center;font-size:0.7rem;color:var(--c-text-3);padding:0.5rem 0 1rem;">'
-    'Source: Euronext Live · Delayed ~15 min · Personal use only · Not for redistribution'
-    '</div>',
-    unsafe_allow_html=True,
+st.caption(
+    "Source: Yahoo Finance via yfinance · This is a broad-universe proxy, not an official Euronext market-total feed."
 )
+
